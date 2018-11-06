@@ -16,6 +16,18 @@ These are some platforms we've tested on:
 apt install libglfw3-dev libglm-dev libx11-dev libegl1-mesa-dev libpng-dev libjpeg-dev
 ```
 
+Install libglvnd (sometimes not necessary, but will be needed to resolve conflicts
+if multiple opengl libraries exist on your system):
+```bash
+cd SOME/DOWNLOAD_DIR/
+git clone https://github.com/NVIDIA/libglvnd && cd libglvnd
+./autogen.sh && ./configure --prefix=SOME/INSTALL_DIR --disable-egl
+# disable-egl is needed, to use libEGL that comes with the driver, but everything else from libglvnd
+make && make install
+# add INSTALL_DIR/lib/pkgconfig to PKG_CONFIG_PATH
+# add INSTALL_DIR/lib to LD_LIBRARY_PATH
+```
+
 ### macOS
 ```bash
 brew install glfw glm jpeg libpng pkg-config
