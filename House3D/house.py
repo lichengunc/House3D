@@ -96,7 +96,7 @@ def fill_obj_mask(house, dest, obj, c=1):
     n_row = dest.shape[0]
     _x1, _, _y1 = obj['bbox']['min']
     _x2, _, _y2 = obj['bbox']['max']
-    x1,y1,x2,y2 = house.rescale(_x1,_y1,_x2,_y2,n_row)
+    x1,y1,x2,y2 = house.rescale(_x1,_y1,_x2,_y2,n_row)  # convert continuous region into grids
     fill_region(dest, x1, y1, x2, y2, c)
 
 
@@ -167,10 +167,10 @@ class House(object):
         self.L_lo = min(_L_lo[0], _L_lo[2])
         self.L_max_coor = _L_hi = np.array(level['bbox']['max'])
         self.L_hi = max(_L_hi[0], _L_hi[2])
-        self.L_det = self.L_hi - self.L_lo
-        self.n_row = ColideRes
-        self.eagle_n_row = EagleViewRes
-        self.grid_det = self.L_det / self.n_row
+        self.L_det = self.L_hi - self.L_lo       # longer edge of the house
+        self.n_row = ColideRes                   # 2d map resolution for collision check
+        self.eagle_n_row = EagleViewRes          # top-down 2D map resolution
+        self.grid_det = self.L_det / self.n_row  # length per grid
         self.all_obj = [node for node in level['nodes'] if node['type'].lower() == 'object']
         self.all_rooms = [node for node in level['nodes'] if (node['type'].lower() == 'room') and ('roomTypes' in node)]
         self.all_roomTypes = [room['roomTypes'] for room in self.all_rooms]
@@ -210,7 +210,7 @@ class House(object):
                 print('Loading Obstacle Map and Movability Map From Cache File ...')
                 ts = time.time()
             with open(CachedFile, 'rb') as f:
-                self.obsMap, self.moveMap = pickle.load(f)
+                self.obsMap, self.moveMap, self.levelConnMap = pickle.load(f)
 
             if DebugMessages == True:
                 print('  --> Done! Elapsed = %.2fs' % (time.time()-ts))
@@ -236,12 +236,20 @@ class House(object):
             if DebugMessages == True:
                 print('  --> Done! Elapsed = %.2fs' % (time.time()-ts))
 
+            # generate connMap for whole level by calling _find_components
+            if DebugMessages == True:
+                print('Generating Connection Map for whole level...')
+            self.levelConnMap = np.zeros((self.n_row+1, self.n_row+1), dtype=np.int8)  # initially not connected
+            self.genLevelConnMap()
+            if DebugMessages == True:
+                print('  --> Done! Elapsed = %.2fs' % (time.time()-ts))
+
             if StorageFile is not None:
                 if DebugMessages == True:
-                    print('Storing Obstacle Map and Movability Map to Cache File ...')
+                    print('Storing Obstacle Map and Movability Map and LevelConnected Map to Cache File ...')
                     ts = time.time()
                 with open(StorageFile, 'wb') as f:
-                    pickle.dump([self.obsMap, self.moveMap], f)
+                    pickle.dump([self.obsMap, self.moveMap, self.levelConnMap], f)
                 if DebugMessages == True:
                     print('  --> Done! Elapsed = %.2fs' % (time.time()-ts))
 
@@ -293,7 +301,7 @@ class House(object):
 
     def _find_components(self, x1, y1, x2, y2, dirs=None, return_largest=False, return_open=False):
         """
-        return a list of components (coors), which are grid locations connencted and canMove
+        return a list of components (discretized coords), which are grid locations connencted and canMove
         @:param return_largest: return_largest == True, return only a single list of coors, the largest components
         @:param return_open: return_open == True, return only those components connected to outside of the room
         @:param dirs: connected directions, by default 4-connected (L,R,U,D)
@@ -344,7 +352,56 @@ class House(object):
         return ret_comps
 
     """
+    Sets self.connMap to distances to target point with some margin
+    """
+    def setTargetPoint(self, x, y, margin_x=15, margin_y=15):
+        self.connMap = connMap = np.ones((self.n_row+1, self.n_row+1), dtype=np.int32) * -1
+        self.inroomDist = inroomDist = np.ones((self.n_row+1, self.n_row+1), dtype=np.float32) * -1
+        dirs = [[0, 1], [1, 0], [-1, 0], [0, -1]]
+
+        x1, y1, x2, y2 = x-margin_x, y-margin_y, x+margin_x, y+margin_y
+        _x, _y = self.to_coor(x, y)
+
+        curr_components = self._find_components(x1, y1, x2, y2, dirs=dirs, return_open=True)
+        if len(curr_components) == 0:
+            return False
+
+        que = []
+        if isinstance(curr_components[0], list):  # join all the coors in the open components
+            curr_major_coors = list(itertools.chain(*curr_components))
+        else:
+            curr_major_coors = curr_components
+        min_dist_to_center = 1e50
+        for xx, yy in curr_major_coors:
+            connMap[xx, yy] = 0
+            que.append((xx, yy))
+            tx, ty = self.to_coor(xx, yy)
+            tdist = np.sqrt((tx - _x) ** 2 + (ty - _y) ** 2)
+            if tdist < min_dist_to_center:
+                min_dist_to_center = tdist
+            inroomDist[xx, yy] = tdist
+        for xx, yy in curr_major_coors:
+            inroomDist[xx, yy] -= min_dist_to_center
+
+        ptr = 0
+        self.maxConnDist = 1
+        while ptr < len(que):
+            xx, yy = que[ptr]
+            cur_dist = connMap[xx, yy]
+            ptr += 1
+            for dx, dy in dirs:
+                tx, ty = xx+dx, yy+dy
+                if self.inside(tx,ty) and self.canMove(tx,ty) and not self.isConnect(tx, ty):
+                    que.append((tx,ty))
+                    connMap[tx,ty] = cur_dist + 1
+                    if cur_dist + 1 > self.maxConnDist:
+                        self.maxConnDist = cur_dist + 1
+        return True
+
+    """
     set the distance to a particular room type
+    - inroomDist : physical distance between center to position inside room
+    - connMap    : num. of steps between position to room inside house
     """
     def setTargetRoom(self, targetRoomTp = 'kitchen', _setEagleMap = False):
         targetRoomTp = targetRoomTp.lower()
@@ -397,7 +454,7 @@ class House(object):
                     connMap[x, y] = 0
                     que.append((x, y))
                     tx, ty = self.to_coor(x, y)
-                    tdist = np.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
+                    tdist = np.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)  # distance in continuous space.
                     if tdist < min_dist_to_center:
                         min_dist_to_center = tdist
                     inroomDist[x, y] = tdist
@@ -415,13 +472,14 @@ class House(object):
             ptr += 1
             for dx,dy in dirs:
                 tx,ty = x+dx,y+dy
-                if self.inside(tx,ty) and self.canMove(tx,ty) and not self.isConnect(tx, ty):
+                if self.inside(tx,ty) and self.canMove(tx,ty) and not self.isConnect(tx, ty):  
+                    # coor inside house, can move, not connected to target room
                     que.append((tx,ty))
                     connMap[tx,ty] = cur_dist + 1
                     if cur_dist + 1 > self.maxConnDist:
                         self.maxConnDist = cur_dist + 1
         self.connMapDict[targetRoomTp] = (connMap, que, inroomDist, self.maxConnDist)
-        self.connectedCoors = que
+        self.connectedCoors = que  # here coords are still discretized grids
         print(' >>>> ConnMap Cached!')
         return True  # room changed!
 
@@ -610,6 +668,15 @@ class House(object):
         """
         return [(0, 0, self.n_row+1, self.n_row+1)]
 
+
+    def genLevelConnMap(self):
+        x1, y1 = self.L_min_coor[0], self.L_min_coor[2]  # level coor
+        x2, y2 = self.L_max_coor[0], self.L_max_coor[2]  # level coor 
+        level_x1, level_y1 = self.to_grid(x1, y1)
+        level_x2, level_y2 = self.to_grid(x2, y2)
+        comp = self._find_components(level_x1, level_y1, level_x2, level_y2, return_largest=True)
+        for x, y in comp:
+            self.levelConnMap[x,y] = 1
 
     """
     check whether the *grid* coordinate (x,y) is inside the house
