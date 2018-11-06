@@ -165,7 +165,7 @@ class Environment():
             for i in range(n_row):  # w
                 for j in range(n_row):  # h
                     if house.obsMap[i, j] == 0:
-                        locMap[j, i, :] = 255
+                        locMap[j, i, :] = 255   # i, j --> j, i, thus the output 2dmap is transposed
                     if house.canMove(i, j):
                         locMap[j, i, :2] = 200  # purple
             self.cachedLocMap = locMap.copy()
